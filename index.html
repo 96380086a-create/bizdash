@@ -1133,6 +1133,7 @@ function viewSettings(){
         </label>
         <button class="btn ghost" data-act="demo" type="button">טעינת נתוני דוגמה</button>
         <button class="btn danger" data-act="reset" type="button">איפוס כל הנתונים</button>
+        <button class="btn ghost" data-act="logout" type="button">התנתקות מהחשבון</button>
       </div>
     </div>`;
 }
@@ -1269,6 +1270,7 @@ document.addEventListener('click', e => {
     save(); render(); toast('נמחק בהצלחה');
     return;
   }
+  if (act==='logout') return logout();
   if (act==='print-report') return window.print();
   if (act==='csv-report') return exportReportCsv();
   if (act==='export') return exportBackup();
