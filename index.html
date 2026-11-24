@@ -1345,6 +1345,7 @@ document.addEventListener('visibilitychange', async () => {
   try { await pullRemote(); render(); } catch(e){ /* keep the current view */ }
 });
 
+history.replaceState(null, '', location.pathname + '#dashboard');
 route();
 session = readSession();
 if (session) startApp(); else showLogin();
