@@ -174,9 +174,25 @@ input[type=file][hidden]{display:none}
   .nav a{padding:8px 14px}
   .side-foot{display:none}
 }
+.login{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#eef2ee;z-index:200;padding:20px}
+.login.show{display:flex}
+.login-card{width:min(380px,92vw);display:grid;gap:12px}
+.login-err{color:#b42318;min-height:1.2em;font-size:14px}
+body.locked .app{display:none}
+#logoutBtn{color:#e3b636;text-decoration:none}
 </style>
 </head>
 <body>
+<div class="login" id="login">
+  <form id="loginForm" class="card login-card">
+    <h2>כניסה ללוח הבקרה</h2>
+    <div class="sub">הזינו את האימייל והסיסמה שקיבלתם.</div>
+    <label>אימייל<input name="email" type="email" required autocomplete="username"></label>
+    <label>סיסמה<input name="password" type="password" required autocomplete="current-password"></label>
+    <div id="loginErr" class="login-err"></div>
+    <button class="btn" type="submit">כניסה</button>
+  </form>
+</div>
 <div class="app">
   <aside class="sidebar">
     <div class="brand">
@@ -187,7 +203,7 @@ input[type=file][hidden]{display:none}
       </div>
     </div>
     <nav class="nav" id="nav"></nav>
-    <div class="side-foot">הנתונים נשמרים בדפדפן. גבו מדי שבוע.</div>
+    <div class="side-foot">מסונכרן לשרת המשותף · <a href="#" id="logoutBtn">התנתקות</a></div>
   </aside>
   <main class="main">
     <header class="topbar">
@@ -220,6 +236,95 @@ function emptyDb(){
     recurring:[], annual:[], employees:[], worklog:[]
   };
 }
+/* ============ Shared storage (Supabase) ============ */
+const SB_URL = 'https://bczzlvfidtqlvoaushfx.supabase.co';
+const SB_KEY = 'sb_publishable_Zfc43osEgOEGFzzsNA0VaQ_OPg8Xy8B';
+const SESSION_KEY = 'bizdash.session';
+let session = null;
+let saveTimer = null;
+
+function readSession(){ try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch(e){ return null; } }
+function storeSession(s){
+  session = s;
+  if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s));
+  else localStorage.removeItem(SESSION_KEY);
+}
+function sessionFrom(j){
+  return { access: j.access_token, refresh: j.refresh_token, expires: Date.now() + (j.expires_in || 3600) * 1000 };
+}
+async function authRequest(path, body){
+  const r = await fetch(`${SB_URL}/auth/v1/${path}`, {
+    method:'POST', headers:{apikey: SB_KEY, 'Content-Type':'application/json'}, body: JSON.stringify(body)
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error_description || j.msg || 'AUTH_FAILED');
+  return j;
+}
+async function getAccessToken(){
+  if (!session) return null;
+  if (session.expires - Date.now() > 60000) return session.access;
+  try {
+    const j = await authRequest('token?grant_type=refresh_token', { refresh_token: session.refresh });
+    storeSession(sessionFrom(j));
+    return session.access;
+  } catch(e){ storeSession(null); return null; }
+}
+async function dbRequest(method, query, body){
+  const token = await getAccessToken();
+  if (!token) throw new Error('AUTH');
+  const headers = { apikey: SB_KEY, Authorization: `Bearer ${token}`, 'Content-Type':'application/json' };
+  if (method !== 'GET') headers.Prefer = 'return=minimal';
+  const r = await fetch(`${SB_URL}/rest/v1/biz_data${query}`, {
+    method, headers, body: body ? JSON.stringify(body) : undefined
+  });
+  if (r.status === 401) throw new Error('AUTH');
+  if (!r.ok) throw new Error('DB_' + r.status);
+  return method === 'GET' ? r.json() : null;
+}
+async function pullRemote(){
+  const rows = await dbRequest('GET', '?id=eq.1&select=data');
+  const remote = rows[0] && rows[0].data;
+  if (remote && Object.keys(remote).length){
+    db = Object.assign(emptyDb(), remote);
+    db.settings = Object.assign(emptyDb().settings, remote.settings || {});
+    migrate();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+  } else {
+    await pushRemote(true);   // first use: the server is empty, so upload what this computer has
+  }
+}
+async function pushRemote(quiet){
+  try { await dbRequest('PATCH', '?id=eq.1', { data: db }); }
+  catch(e){
+    if (e.message === 'AUTH') return showLogin('פג תוקף ההתחברות, התחברו שוב.');
+    toast('השמירה לשרת נכשלה. הנתונים נשמרו במחשב הזה ונשלחו בפעם הבאה.');
+  }
+}
+function scheduleRemoteSave(){
+  if (!session) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => { saveTimer = null; pushRemote(); }, 300);
+}
+function showLogin(msg){
+  document.body.classList.add('locked');
+  document.getElementById('login').classList.add('show');
+  document.getElementById('loginErr').textContent = msg || '';
+}
+function hideLogin(){
+  document.body.classList.remove('locked');
+  document.getElementById('login').classList.remove('show');
+}
+async function startApp(){
+  hideLogin();
+  try { await pullRemote(); }
+  catch(e){
+    if (e.message === 'AUTH') return showLogin('פג תוקף ההתחברות, התחברו שוב.');
+    toast('אין חיבור לשרת. מוצגים הנתונים השמורים במחשב הזה.');
+  }
+  route();
+}
+function logout(){ storeSession(null); location.reload(); }
+
 let db;
 try { db = JSON.parse(localStorage.getItem(STORAGE_KEY)) || emptyDb(); } catch(e){ db = emptyDb(); }
 db = Object.assign(emptyDb(), db);
@@ -241,6 +346,7 @@ function migrate(){
 function save(){
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); }
   catch(e){ toast('שמירה נכשלה: בדקו את שטח האחסון של הדפדפן'); }
+  scheduleRemoteSave();
 }
 
 const THEMES = {
@@ -1019,7 +1125,7 @@ function viewSettings(){
     </form>
 
     <div class="card">
-      <div class="card-h"><div><h2>גיבוי ונתונים</h2><div class="sub">הנתונים נשמרים בדפדפן של המחשב הזה. מומלץ לגבות מדי שבוע.</div></div></div>
+      <div class="card-h"><div><h2>גיבוי ונתונים</h2><div class="sub">הנתונים מסונכרנים לשרת המשותף. מומלץ לגבות מדי שבוע.</div></div></div>
       <div class="btn-row">
         <button class="btn" data-act="export" type="button">הורדת גיבוי (JSON)</button>
         <label class="btn ghost" style="cursor:pointer">טעינת גיבוי
@@ -1214,7 +1320,32 @@ document.addEventListener('mouseover', e => { const b = e.target.closest('[data-
 
 document.addEventListener('keydown', e => { if (e.key==='Escape') closeModal(); });
 
+document.addEventListener('submit', async e => {
+  if (e.target.id !== 'loginForm') return;
+  e.preventDefault();
+  const f = e.target, btn = f.querySelector('button');
+  btn.disabled = true;
+  document.getElementById('loginErr').textContent = '';
+  try {
+    const j = await authRequest('token?grant_type=password', { email: f.email.value.trim(), password: f.password.value });
+    storeSession(sessionFrom(j));
+    f.password.value = '';
+    await startApp();
+  } catch(err){
+    document.getElementById('loginErr').textContent = err.message === 'Failed to fetch' ? 'אין חיבור לשרת' : 'האימייל או הסיסמה שגויים';
+  } finally { btn.disabled = false; }
+});
+document.addEventListener('click', e => {
+  if (e.target.id === 'logoutBtn'){ e.preventDefault(); logout(); }
+});
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || !session || saveTimer) return;
+  try { await pullRemote(); render(); } catch(e){ /* keep the current view */ }
+});
+
 route();
+session = readSession();
+if (session) startApp(); else showLogin();
 </script>
 </body>
 </html>
