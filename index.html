@@ -242,7 +242,6 @@ const SB_KEY = 'sb_publishable_Zfc43osEgOEGFzzsNA0VaQ_OPg8Xy8B';
 const SESSION_KEY = 'bizdash.session';
 let session = null;
 let saveTimer = null;
-let prefs = {};   // personal display settings, stored per account
 
 function readSession(){ try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch(e){ return null; } }
 function storeSession(s){
@@ -322,40 +321,7 @@ async function startApp(){
     if (e.message === 'AUTH') return showLogin('פג תוקף ההתחברות, התחברו שוב.');
     toast('אין חיבור לשרת. מוצגים הנתונים השמורים במחשב הזה.');
   }
-  await loadPrefs();
   route();
-}
-function currentUserId(){
-  if (!session) return null;
-  try {
-    const b64 = session.access.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
-    return JSON.parse(atob(b64)).sub;
-  } catch(e){ return null; }
-}
-async function userRequest(method, query, body){
-  const token = await getAccessToken();
-  if (!token) throw new Error('AUTH');
-  const headers = { apikey: SB_KEY, Authorization: `Bearer ${token}`, 'Content-Type':'application/json' };
-  if (method === 'POST') headers.Prefer = 'resolution=merge-duplicates,return=minimal';
-  const r = await fetch(`${SB_URL}/rest/v1/user_prefs${query}`, {
-    method, headers, body: body ? JSON.stringify(body) : undefined
-  });
-  if (r.status === 401) throw new Error('AUTH');
-  if (!r.ok) throw new Error('DB_' + r.status);
-  return method === 'GET' ? r.json() : null;
-}
-async function loadPrefs(){
-  try {
-    const rows = await userRequest('GET', '?select=prefs');
-    prefs = (rows[0] && rows[0].prefs) || {};
-  } catch(e){ prefs = {}; }
-}
-async function savePrefs(){
-  const uid = currentUserId();
-  if (!uid) return;
-  try { await userRequest('POST', '', { user_id: uid, prefs }); }
-  catch(e){ toast('לא הצלחנו לשמור את ההעדפות האישיות'); }
-  applyTheme();
 }
 function logout(){ storeSession(null); location.reload(); }
 
@@ -390,7 +356,7 @@ const THEMES = {
   slate:{name:'אפור פלדה', side1:'#2f3b4d', side2:'#1b2330', navy:'#1b2330', teal:'#4f7fd6', soft:'#e1ebfa', ink:'#2f5fa3', gold:'#f2b84b'}
 };
 function applyTheme(){
-  const T = THEMES[prefs.theme || db.settings.theme] || THEMES.classic;
+  const T = THEMES[db.settings.theme] || THEMES.classic;
   const st = document.documentElement.style;
   st.setProperty('--side1', T.side1); st.setProperty('--side2', T.side2); st.setProperty('--navy', T.navy);
   st.setProperty('--teal', T.teal); st.setProperty('--teal-soft', T.soft); st.setProperty('--teal-ink', T.ink);
@@ -776,8 +742,7 @@ function saveSettings(form){
   s.stripVat = g('stripVat').checked;
   s.vatRate = Number(g('vatRate').value) || 0;
   s.allocation = g('allocation').value;
-  prefs.theme = g('theme').value;
-  savePrefs();
+  s.theme = g('theme').value;
   s.categories = g('categories').value.split('\n').map(x=>x.trim()).filter(Boolean);
   save(); render(); toast('ההגדרות נשמרו');
 }
@@ -1144,7 +1109,7 @@ function viewSettings(){
       <div class="form-grid">
         <label>שם העסק<input name="businessName" value="${esc(s.businessName)}"></label>
         <label>שיעור מע"מ (%)<input name="vatRate" type="number" min="0" step="any" value="${esc(s.vatRate)}"></label>
-        <label>ערכת צבעים<select name="theme">${Object.entries(THEMES).map(([k,t]) => `<option value="${k}" ${(prefs.theme||s.theme)===k?'selected':''}>${t.name}</option>`).join('')}</select></label>
+        <label>ערכת צבעים<select name="theme">${Object.entries(THEMES).map(([k,t]) => `<option value="${k}" ${s.theme===k?'selected':''}>${t.name}</option>`).join('')}</select></label>
         <label>שיוך הוצאות כלליות לקמפיינים
           <select name="allocation">
             <option value="students" ${s.allocation==='students'?'selected':''}>לפי מספר תלמידים</option>
