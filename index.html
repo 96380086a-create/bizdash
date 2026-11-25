@@ -185,6 +185,8 @@ body.locked .app{display:none}
 select.btn-select{width:auto;appearance:none;-webkit-appearance:none;background-color:var(--teal);color:#fff;border:0;border-radius:12px;padding:10px 16px 10px 36px;font-weight:600;font-size:14px;cursor:pointer;box-shadow:0 6px 16px rgba(14,159,140,.25);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%23fff' stroke-width='2'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:left 14px center}
 select.btn-select:focus{outline:none;box-shadow:0 0 0 3px rgba(14,159,140,.3)}
 select.btn-select option{background:#fff;color:var(--ink)}
+.bar-fc{fill:var(--rose);fill-opacity:.22;stroke:var(--rose);stroke-dasharray:3 2;stroke-width:1}
+.legend i.fc-dot{background:rgba(226,85,59,.22);outline:1px dashed var(--rose);outline-offset:-1px}
 </style>
 </head>
 <body>
@@ -344,6 +346,7 @@ function migrate(){
   db.sales.forEach(s => { if (!s.month) s.month = String(s.date||'').slice(0,7); if (!s.date) s.date = `${s.month}-01`; });
   db.products.forEach(p => { if (p.extraCost === undefined) p.extraCost = 0; });
   db.tracks.forEach(t => { if (t.perStudentCost === undefined) t.perStudentCost = 0; });
+  db.campaigns.forEach(c => { const y = Number(String(c.date||'').slice(0,4)); if (y) c.year = y; });
   const ids = new Set(db.campaigns.map(c => c.id));
   db.tracks = db.tracks.filter(t => ids.has(t.campaignId));
   db.expenses.forEach(e => {
@@ -439,7 +442,7 @@ function expenseRows(y){
       if (ym < (r.from||'0000-00')) continue;
       if (r.to && ym > r.to) continue;
       const amt = Number(r.amount)||0;
-      rows.push({d:`${ym}-01`, ym, name:r.name, cat:r.category||'אחר', gross:amt, net:expNet(amt,r.vat), scope:'general', campaignId:null});
+      rows.push({d:`${ym}-01`, ym, name:r.name, cat:r.category||'אחר', gross:amt, net:expNet(amt,r.vat), scope:'general', campaignId:null, forecast: ym > thisMonth()});
     }
   });
   db.annual.forEach(a => {
@@ -447,7 +450,7 @@ function expenseRows(y){
     const monthly = (Number(a.amount)||0)/12;
     for (let m=1; m<=12; m++){
       const ym = `${y}-${pad(m)}`;
-      rows.push({d:`${ym}-01`, ym, name:a.name, cat:a.category||'אחר', gross:monthly, net:expNet(monthly,a.vat), scope:'general', campaignId:null});
+      rows.push({d:`${ym}-01`, ym, name:a.name, cat:a.category||'אחר', gross:monthly, net:expNet(monthly,a.vat), scope:'general', campaignId:null, forecast: ym > thisMonth()});
     }
   });
   db.worklog.forEach(w => {
@@ -486,10 +489,12 @@ function revenueRows(y){
 
 function summary(y, onlyMonths){
   const inM = ym => !onlyMonths || onlyMonths.includes(Number(String(ym).slice(5,7)));
-  const ex = expenseRows(y).filter(r => inM(r.ym)), rv = revenueRows(y).filter(r => inM(r.ym));
-  const months = Array.from({length:12}, () => ({inc:0, exp:0}));
+  const allEx = expenseRows(y).filter(r => inM(r.ym)), rv = revenueRows(y).filter(r => inM(r.ym));
+  const ex = allEx.filter(r => !r.forecast), fc = allEx.filter(r => r.forecast);
+  const months = Array.from({length:12}, () => ({inc:0, exp:0, fc:0}));
   const cats = {};
-  let income=0, expense=0;
+  let income=0, expense=0, forecast=0;
+  fc.forEach(r => { forecast += r.net; const i=monthIdx(r.d); if (i>=0 && i<12) months[i].fc += r.net; });
   rv.forEach(r => { income += r.net; const i=monthIdx(r.d); if (i>=0 && i<12) months[i].inc += r.net; });
   ex.forEach(r => {
     expense += r.net;
@@ -498,20 +503,40 @@ function summary(y, onlyMonths){
   });
   const students = rv.filter(r => r.scope==='course').reduce((a,r)=>a+(r.students||0),0);
   const unitsSold = db.sales.filter(s => yearOf(s.date)===y && inM(ymOf(s.date))).reduce((a,s)=>a+(Number(s.qty)||0),0);
-  return {ex, rv, income, expense, profit:income-expense, months, cats, students, unitsSold};
+  return {ex, fc, rv, income, expense, forecast, profit:income-expense, months, cats, students, unitsSold};
 }
 
-function campaignStats(y, S){
-  const generalNet = S.ex.filter(r=>r.scope==='general').reduce((a,r)=>a+r.net,0);
-  return db.campaigns.filter(c => Number(c.year)===y).map(c => {
-    const courseRows = S.rv.filter(r => r.scope==='course' && r.campaignId===c.id);
-    const st = courseRows.reduce((a,r)=>a+(r.students||0),0);
-    const course = courseRows.reduce((a,r)=>a+r.net,0);
-    const direct = S.ex.filter(r => r.scope==='campaign' && r.campaignId===c.id).reduce((a,r)=>a+r.net,0);
-    const alloc = (db.settings.allocation==='students' && S.students) ? generalNet*st/S.students : 0;
-    const profit = course - direct - alloc;
-    return {c, students:st, course, direct, alloc, profit, perStudent: st ? profit/st : 0};
+// Every expense of a campaign, whatever its date: direct, per-student and per-track costs.
+function campaignExpenseItems(c){
+  const items = db.expenses.filter(e => (e.scope==='campaign'||e.scope==='perStudent') && e.campaignId===c.id).map(e => {
+    const a = Number(e.amount)||0;
+    const net = e.scope==='perStudent' ? expNet(a,e.vat)*studentsOf(c.id) : expNet(a,e.vat);
+    return {d:e.date, name:e.name, cat:e.category||'אחר', label:scopeLabel(e), net};
   });
+  db.tracks.filter(t => t.campaignId===c.id && Number(t.perStudentCost)).forEach(t => {
+    const n = Number(t.students)||0, a = Number(t.perStudentCost)||0;
+    items.push({d:c.date, name:`הוצאות קבועות לתלמיד · ${t.name} (${money(a)} × ${num(n)})`, cat:'הוצאות מסלול', label:`מסלול ${t.name}`, net:expNet(a,true)*n});
+  });
+  return items.sort((a,b) => String(b.d).localeCompare(String(a.d)));
+}
+// Full result of one campaign. General expenses of the campaign's year are shared by student count.
+function campaignStat(c, cache){
+  const y = Number(c.year);
+  const S = (cache && cache[y]) || summary(y);
+  if (cache) cache[y] = S;
+  const tracks = db.tracks.filter(t => t.campaignId===c.id);
+  const st = tracks.reduce((a,t)=>a+(Number(t.students)||0),0);
+  const course = tracks.reduce((a,t)=>a+revNet((Number(t.price)||0)*(Number(t.students)||0)),0);
+  const direct = campaignExpenseItems(c).reduce((a,r)=>a+r.net,0);
+  const generalNet = S.ex.filter(r=>r.scope==='general').reduce((a,r)=>a+r.net,0);
+  const yearStudents = db.campaigns.filter(x => Number(x.year)===y).reduce((a,x)=>a+studentsOf(x.id),0);
+  const alloc = (db.settings.allocation==='students' && yearStudents) ? generalNet*st/yearStudents : 0;
+  const profit = course - direct - alloc;
+  return {c, students:st, course, direct, alloc, profit, perStudent: st ? profit/st : 0};
+}
+function campaignStats(y){
+  const cache = {};
+  return db.campaigns.filter(c => Number(c.year)===y).map(c => campaignStat(c, cache));
 }
 
 function productStats(y, onlyMonths){
@@ -534,14 +559,13 @@ function scopeLabel(e){
 /* ============ Schema: one definition drives forms, tables and validation ============ */
 const SCHEMA = {
   campaigns:{
-    label:'קמפיין',
+    label:'קמפיין', newLabel:'קמפיין חדש',
     fields:[
       {k:'name', l:'שם הקמפיין', t:'text', req:1, ph:'למשל: חורף 2026'},
       {k:'season', l:'עונה', t:'select', opts:[['winter','חורף'],['summer','קיץ']], def:'winter'},
-      {k:'year', l:'שנה', t:'number', req:1, def:()=>state.year},
-      {k:'date', l:'תאריך פתיחה', t:'date', req:1, def:today}
+      {k:'date', l:'תאריך פתיחה (קובע גם את השנה)', t:'date', req:1, def:today}
     ],
-    beforeSave:d => { d.year=Number(d.year); },
+    beforeSave:d => { d.year = yearOf(d.date); },
     cols:[
       {l:'שם', f:c=>esc(c.name)},
       {l:'עונה', f:c=>c.season==='summer'?'קיץ':'חורף'},
@@ -551,7 +575,7 @@ const SCHEMA = {
     ]
   },
   tracks:{
-    label:'מסלול',
+    label:'מסלול', newLabel:'מסלול חדש',
     fields:[
       {k:'campaignId', l:'קמפיין', t:'ref', ref:'campaigns', req:1},
       {k:'name', l:'שם המסלול', t:'text', req:1, ph:'למשל: ללא ליווי'},
@@ -571,7 +595,7 @@ const SCHEMA = {
     ]
   },
   products:{
-    label:'מוצר',
+    label:'מוצר', newLabel:'מוצר חדש',
     fields:[
       {k:'name', l:'שם המוצר', t:'text', req:1},
       {k:'price', l:'מחיר לקוח (כולל מע"מ)', t:'number', req:1},
@@ -591,7 +615,7 @@ const SCHEMA = {
     ]
   },
   sales:{
-    label:'מכירה',
+    label:'מכירה', newLabel:'מכירה חדשה',
     fields:[
       {k:'month', l:'חודש', t:'month', req:1, def:thisMonth},
       {k:'productId', l:'מוצר', t:'ref', ref:'products', req:1},
@@ -611,7 +635,7 @@ const SCHEMA = {
     ]
   },
   expenses:{
-    label:'הוצאה',
+    label:'הוצאה', newLabel:'הוצאה חדשה',
     fields:[
       {k:'date', l:'תאריך', t:'date', req:1, def:today},
       {k:'name', l:'תיאור ההוצאה', t:'text', req:1},
@@ -625,7 +649,8 @@ const SCHEMA = {
       ], def:'general'},
       {k:'campaignId', l:'קמפיין (לשיוך קמפיין)', t:'ref', ref:'campaigns'}
     ],
-    beforeSave:d => { d.amount=Number(d.amount)||0; },
+    beforeSave:d => { d.amount=Number(d.amount)||0; if (d.scope==='general') d.campaignId = null; },
+    validate:d => (d.scope==='campaign'||d.scope==='perStudent') && !d.campaignId ? 'בחרו קמפיין: הוצאה בשיוך קמפיין חייבת להיות משויכת לקמפיין מסוים' : '',
     cols:[
       {l:'תאריך', f:e=>fmtDate(e.date)},
       {l:'תיאור', f:e=>esc(e.name)},
@@ -637,7 +662,7 @@ const SCHEMA = {
     ]
   },
   recurring:{
-    label:'הוצאה קבועה',
+    label:'הוצאה קבועה', newLabel:'הוצאה קבועה חדשה',
     fields:[
       {k:'name', l:'תיאור', t:'text', req:1},
       {k:'amount', l:'סכום חודשי', t:'number', req:1},
@@ -657,7 +682,7 @@ const SCHEMA = {
     ]
   },
   annual:{
-    label:'הוצאה שנתית',
+    label:'הוצאה שנתית', newLabel:'הוצאה שנתית חדשה',
     fields:[
       {k:'name', l:'תיאור', t:'text', req:1},
       {k:'amount', l:'סכום שנתי (יתחלק ב-12)', t:'number', req:1},
@@ -675,7 +700,7 @@ const SCHEMA = {
     ]
   },
   employees:{
-    label:'עובד',
+    label:'עובד', newLabel:'עובד חדש',
     fields:[
       {k:'name', l:'שם העובד', t:'text', req:1},
       {k:'rate', l:'תעריף לשעה (ללא מע"מ)', t:'number', req:1}
@@ -687,7 +712,7 @@ const SCHEMA = {
     ]
   },
   worklog:{
-    label:'רישום שעות',
+    label:'רישום שעות', newLabel:'רישום שעות חדש',
     fields:[
       {k:'employeeId', l:'עובד', t:'ref', ref:'employees', req:1},
       {k:'month', l:'חודש', t:'month', req:1, def:thisMonth},
@@ -706,8 +731,8 @@ const SCHEMA = {
 /* ============ Form rendering & submission ============ */
 function optsOf(f){ return typeof f.opts==='function' ? f.opts() : (f.opts||[]); }
 
-function fieldHtml(f, item){
-  let v = item ? item[f.k] : (typeof f.def==='function' ? f.def() : f.def);
+function fieldHtml(f, item, defaults){
+  let v = item ? item[f.k] : (defaults && defaults[f.k] !== undefined ? defaults[f.k] : (typeof f.def==='function' ? f.def() : f.def));
   if (v===undefined || v===null) v='';
   const req = f.req ? 'required' : '';
   if (f.t==='check') return `<label class="check"><input type="checkbox" name="${f.k}" ${v?'checked':''}> ${esc(f.l)}</label>`;
@@ -721,14 +746,14 @@ function fieldHtml(f, item){
   return `<label>${esc(f.l)}<input name="${f.k}" type="${f.t}" value="${esc(v)}" ${step} ${req} ${f.ph?`placeholder="${esc(f.ph)}"`:''}></label>`;
 }
 
-function openModal(key, id){
+function openModal(key, id, defaults){
   const sc = SCHEMA[key];
   const item = id ? db[key].find(x=>x.id===id) : null;
   $('#modalRoot').innerHTML = `
     <div class="overlay" data-overlay>
       <form class="modal" data-form="${key}" data-id="${esc(id||'')}">
         <h3>${item?'עריכת':'הוספת'} ${esc(sc.label)}</h3>
-        <div class="form-grid">${sc.fields.map(f=>fieldHtml(f,item)).join('')}</div>
+        <div class="form-grid">${sc.fields.map(f=>fieldHtml(f,item,defaults)).join('')}</div>
         <div class="modal-actions">
           <button class="btn" type="submit">שמירה</button>
           <button class="btn ghost" type="button" data-act="close-modal">ביטול</button>
@@ -750,6 +775,8 @@ function submitItem(form){
   if (sc.beforeSave) sc.beforeSave(data);
   if (sc.fields.some(f => f.t==='number' && Number(data[f.k])<0)) return toast('אי אפשר להזין ערך שלילי');
   if (key==='recurring' && data.to && data.to < data.from) return toast('חודש הסיום לפני חודש ההתחלה');
+  const problem = sc.validate && sc.validate(data);
+  if (problem) return toast(problem);
   if (id){
     db[key] = db[key].map(x => x.id===id ? {...x, ...data} : x);
   } else {
@@ -780,7 +807,7 @@ function niceCeil(v){
 
 function monthlyChart(months){
   const W=720, H=290, P={t:20, r:16, b:34, l:64};
-  const max = Math.max(1, ...months.flatMap(m=>[m.inc, m.exp]));
+  const max = Math.max(1, ...months.flatMap(m=>[m.inc, m.exp + (m.fc||0)]));
   const top = niceCeil(max);
   const iw = W-P.l-P.r, ih = H-P.t-P.b, gw = iw/12, bw = gw*0.3;
   const yOf = v => P.t + ih - (v/top)*ih;
@@ -793,10 +820,13 @@ function monthlyChart(months){
   let bars = '';
   months.forEach((m,i) => {
     const cx = P.l + i*gw + gw/2;
-    const hInc = P.t+ih-yOf(m.inc), hExp = P.t+ih-yOf(m.exp);
-    bars += `<rect class="bar-inc" x="${cx-bw-2}" y="${yOf(m.inc)}" width="${bw}" height="${Math.max(0,hInc)}" rx="4">data-bar="1" data-label="${MONTH_NAMES[i]} ${state.year}" data-inc="${m.inc}" data-exp="${m.exp}"></rect>`;
-    bars += `<rect class="bar-exp" x="${cx+2}" y="${yOf(m.exp)}" width="${bw}" height="${Math.max(0,hExp)}" rx="4">data-bar="1" data-label="${MONTH_NAMES[i]} ${state.year}" data-inc="${m.inc}" data-exp="${m.exp}"></rect>`;
-    bars += `<rect class="hit" x="${P.l+i*gw}" y="${P.t}" width="${gw}" height="${ih}" fill="transparent" data-bar="1" data-label="${MONTH_NAMES[i]} ${state.year}" data-inc="${m.inc}" data-exp="${m.exp}"></rect>`;
+    const fcv = m.fc||0;
+    const hInc = P.t+ih-yOf(m.inc), hExp = P.t+ih-yOf(m.exp), hFc = P.t+ih-yOf(fcv);
+    const data = `data-bar="1" data-label="${MONTH_NAMES[i]} ${state.year}" data-inc="${m.inc}" data-exp="${m.exp}" data-fc="${fcv}"`;
+    bars += `<rect class="bar-inc" x="${cx-bw-2}" y="${yOf(m.inc)}" width="${bw}" height="${Math.max(0,hInc)}" rx="4" ${data}></rect>`;
+    bars += `<rect class="bar-exp" x="${cx+2}" y="${yOf(m.exp)}" width="${bw}" height="${Math.max(0,hExp)}" rx="4" ${data}></rect>`;
+    if (fcv) bars += `<rect class="bar-fc" x="${cx+2}" y="${yOf(m.exp+fcv)}" width="${bw}" height="${Math.max(0,hFc)}" rx="4" ${data}></rect>`;
+    bars += `<rect class="hit" x="${P.l+i*gw}" y="${P.t}" width="${gw}" height="${ih}" fill="transparent" ${data}></rect>`;
     bars += `<text class="axis" x="${cx}" y="${H-10}" text-anchor="middle">${MONTHS_HE[i]}</text>`;
   });
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="הכנסות והוצאות לפי חודש">${grid}${bars}</svg>`;
@@ -825,13 +855,13 @@ function campCard(s){
   </div>`;
 }
 
-function sectionFor(key, title, sub, extra, filter, sorter){
+function sectionFor(key, title, sub, extra, filter, sorter, defaults){
   const sc = SCHEMA[key];
   const items = [...db[key]].filter(filter||(()=>true)).sort(sorter || ((a,b) => String(b.date||b.month||b.from||'').localeCompare(String(a.date||a.month||a.from||''))));
   return `<div class="card">
     <div class="card-h">
       <div><h2>${esc(title)}</h2><div class="sub">${sub||''}</div></div>
-      <div class="btn-row">${extra||''}<button class="btn" data-act="new" data-key="${key}">+ ${esc(sc.label)} חדש</button></div>
+      <div class="btn-row">${extra||''}<button class="btn" data-act="new" data-key="${key}" ${defaults ? `data-defaults="${esc(JSON.stringify(defaults))}"` : ''}>+ ${esc(sc.newLabel || sc.label+' חדש')}</button></div>
     </div>
     ${items.length ? `<div class="table-wrap"><table class="tbl" data-table="${key}">
       <thead><tr>${sc.cols.map(c=>`<th>${esc(c.l)}</th>`).join('')}<th></th></tr></thead>
@@ -864,11 +894,10 @@ function fmtCell(v, t){
 function buildCampaignReport(){
   const R = state.report, c = campById(R.campaignId);
   if (!c) return {title:'דוח לפי קמפיין', subtitle:'בחרו קמפיין כדי להציג את הדוח', kpis:[], sections:[]};
-  const y = Number(c.year), S = summary(y);
-  const cs = campaignStats(y, S).find(x => x.c.id===c.id);
+  const y = Number(c.year);
+  const st = campaignStat(c);
   const tracks = db.tracks.filter(t => t.campaignId===c.id);
-  const direct = S.ex.filter(r => r.scope==='campaign' && r.campaignId===c.id);
-  const st = cs ? cs : {students:studentsOf(c.id), course:0, direct:0, alloc:0, profit:0, perStudent:0};
+  const direct = campaignExpenseItems(c);
   return {
     title: `דוח קמפיין: ${c.name}`,
     subtitle: `${c.season==='summer'?'קיץ':'חורף'} ${y}`,
@@ -879,8 +908,8 @@ function buildCampaignReport(){
     sections: [
       {title:'מסלולים', headers:['מסלול','מחיר (כולל מע"מ)','תלמידים','הכנסה נטו'], types:['t','m','n','m'],
        rows: tracks.map(t => [t.name, Number(t.price)||0, Number(t.students)||0, revNet((Number(t.price)||0)*(Number(t.students)||0))])},
-      {title:'הוצאות ישירות לקמפיין', headers:['תיאור','קטגוריה','נטו'], types:['t','t','m'],
-       rows: direct.map(r => [r.name, r.cat, r.net])}
+      {title:'הוצאות ישירות לקמפיין', headers:['תאריך','תיאור','קטגוריה','נטו'], types:['t','t','t','m'],
+       rows: direct.map(r => [fmtDate(r.d), r.name, r.cat, r.net])}
     ]
   };
 }
@@ -890,6 +919,8 @@ function buildPeriodReport(){
   const months = periodMonths(R);
   const inP = ym => months.includes(Number(String(ym).slice(5,7)));
   const ex = S.ex.filter(r => inP(r.ym));
+  const fcRows = S.fc.filter(r => inP(r.ym));
+  const fcTotal = fcRows.reduce((a,r)=>a+r.net,0);
   const rv = S.rv.filter(r => inP(r.ym));
   const income = rv.reduce((a,r)=>a+r.net,0);
   const expense = ex.reduce((a,r)=>a+r.net,0);
@@ -902,7 +933,9 @@ function buildPeriodReport(){
     const i = m-1;
     const inc = rv.filter(r=>monthIdx(r.d)===i).reduce((a,r)=>a+r.net,0);
     const exp = ex.filter(r=>monthIdx(r.d)===i).reduce((a,r)=>a+r.net,0);
-    return [MONTH_NAMES[i], inc, exp, inc-exp];
+    const row = [MONTH_NAMES[i], inc, exp, inc-exp];
+    if (fcTotal) row.push(fcRows.filter(r=>monthIdx(r.d)===i).reduce((a,r)=>a+r.net,0));
+    return row;
   });
   const cats = {};
   ex.forEach(r => { cats[r.cat] = (cats[r.cat]||0) + r.net; });
@@ -914,10 +947,11 @@ function buildPeriodReport(){
   return {
     title, subtitle: `${R.type==='month'?'':'תקופה: '}${months.map(m=>MONTH_NAMES[m-1]).join(' – ')} ${y}`,
     kpis: [
-      ['הכנסות נטו', income, 'm'], ['הוצאות נטו', expense, 'm'], ['רווח נקי', income-expense, 'm'], ['תלמידים', students, 'n']
+      ['הכנסות נטו', income, 'm'], ['הוצאות נטו', expense, 'm'], ['רווח נקי', income-expense, 'm'], ['תלמידים', students, 'n'],
+      ...(fcTotal ? [['תחזית הוצאות קבועות (חודשים שעוד לא הגיעו)', fcTotal, 'm']] : [])
     ],
     sections: [
-      {title:'פירוט חודשי', headers:['חודש','הכנסות נטו','הוצאות נטו','רווח'], types:['t','m','m','m'], rows: monthly},
+      {title:'פירוט חודשי', headers:['חודש','הכנסות נטו','הוצאות נטו','רווח', ...(fcTotal ? ['תחזית הוצאות'] : [])], types:['t','m','m','m','m'], rows: monthly},
       {title:'הוצאות לפי קטגוריה', headers:['קטגוריה','סכום נטו','אחוז מההוצאות'], types:['t','m','p'], rows: catRows},
       {title:'הכנסות לפי מקור', headers:['מקור','הכנסה נטו'], types:['t','m'], rows: srcRows}
     ]
@@ -991,26 +1025,29 @@ function viewDashboard(){
   const S = summary(y, onlyMonths);
   const SA = onlyMonths ? summary(y) : S;
   const periodLabel = onlyMonths ? `${MONTH_NAMES[onlyMonths[0]-1]} ${y}` : `שנת ${y}`;
-  const cs = campaignStats(y, S);
+  const cs = campaignStats(y);
   const cats = Object.entries(S.cats).sort((a,b)=>b[1]-a[1]);
   const maxCat = cats[0] ? cats[0][1] : 1;
   const prod = productStats(y, onlyMonths);
   const recent = [...S.rv, ...S.ex.filter(r=>r.scope!=='product')]
+    .filter(r => String(r.d) <= today())
     .sort((a,b)=>String(b.d).localeCompare(String(a.d))).slice(0,8);
-  const avg = S.students ? S.income/S.students : 0;
+  const courseIncome = S.rv.filter(r => r.scope==='course').reduce((a,r)=>a+r.net,0);
+  const avg = S.students ? courseIncome/S.students : 0;
+  const fcText = S.forecast ? ` · תחזית לחודשים הבאים: ${money(S.forecast)}` : '';
 
   return `
     <div class="kpis">
       ${kpi('הכנסות נטו', money(S.income), 'var(--teal)', `${num(S.unitsSold)} יחידות מוצר נמכרו`)}
-      ${kpi('הוצאות נטו', money(S.expense), 'var(--rose)', `${num(db.expenses.filter(e => yearOf(e.date)===y && (!onlyMonths || onlyMonths.includes(Number(String(e.date).slice(5,7))))).length)} הוצאות שהוזנו בתקופה`)}
-      ${kpi('רווח נקי', money(S.profit), S.profit>=0?'var(--teal)':'var(--rose)', `שולי רווח ${pct(S.profit,S.income)}`)}
-      ${kpi('תלמידים', num(S.students), 'var(--amber)', `הכנסה ממוצעת לתלמיד ${money(avg)}`)}
+      ${kpi('הוצאות נטו', money(S.expense), 'var(--rose)', `${num(db.expenses.filter(e => yearOf(e.date)===y && (!onlyMonths || onlyMonths.includes(Number(String(e.date).slice(5,7))))).length)} הוצאות שהוזנו בתקופה${fcText}`)}
+      ${kpi('רווח נקי', money(S.profit), S.profit>=0?'var(--teal)':'var(--rose)', `שולי רווח ${pct(S.profit,S.income)}${S.forecast ? ` · צפוי אחרי התחזית: ${money(S.profit - S.forecast)}` : ''}`)}
+      ${kpi('תלמידים', num(S.students), 'var(--amber)', `הכנסה ממוצעת מקורס לתלמיד ${money(avg)}`)}
     </div>
 
     <div class="grid-2">
       <div class="card">
         <div class="card-h"><h2>הכנסות מול הוצאות לפי חודש</h2></div>
-        <div class="legend" style="margin-bottom:8px"><span><i style="background:var(--teal)"></i>הכנסות נטו</span><span><i style="background:var(--rose)"></i>הוצאות נטו</span></div>
+        <div class="legend" style="margin-bottom:8px"><span><i style="background:var(--teal)"></i>הכנסות נטו</span><span><i style="background:var(--rose)"></i>הוצאות נטו</span>${SA.forecast ? '<span><i class="fc-dot"></i>תחזית הוצאות קבועות</span>' : ''}</div>
         ${monthlyChart(SA.months)}
         <div class="chart-info" id="chartInfo">לחצו על עמודה, או העבירו עליה את העכבר, כדי לראות את הסכום המדויק</div>
       </div>
@@ -1026,7 +1063,7 @@ function viewDashboard(){
     </div>
 
     <div class="card">
-      <div class="card-h"><h2>קמפיינים</h2><span class="sub">${periodLabel}</span></div>
+      <div class="card-h"><h2>קמפיינים</h2><span class="sub">התוצאה המלאה של כל קמפיין שנפתח בשנת ${y}</span></div>
       ${cs.length ? `<div class="grid-3">${cs.map(campCard).join('')}</div>` : '<div class="empty">אין קמפיינים לשנה זו. הוסיפו קמפיין בעמוד "קמפיינים".</div>'}
     </div>
 
@@ -1034,7 +1071,7 @@ function viewDashboard(){
       <div class="card">
         <div class="card-h"><h2>רווחיות מוצרים</h2></div>
         <div class="table-wrap"><table class="tbl">
-          <thead><tr><th>מוצר</th><th>יחידות</th><th>הכנסה נטו</th><th>עלות</th><th>רווח</th></tr></thead>
+          <thead><tr><th>מוצר</th><th>יחידות</th><th>הכנסה (כולל מע"מ)</th><th>עלות</th><th>רווח</th></tr></thead>
           <tbody>${prod.map(r => `<tr>
             <td>${esc(r.p.name)}</td>
             <td class="num">${num(r.units)}</td>
@@ -1062,9 +1099,9 @@ function viewDashboard(){
 function viewExpenses(){
   const search = `<input type="search" data-search="expenses" placeholder="חיפוש הוצאה..." style="width:220px">`;
   const isCamp = e => e.scope==='campaign' || e.scope==='perStudent';
-  return sectionFor('expenses', 'הוצאות קמפיין', 'הוצאות ששויכו לקמפיין, בסכום כולל או לכל תלמיד.', search, isCamp)
+  return sectionFor('expenses', 'הוצאות קמפיין', 'הוצאות ששויכו לקמפיין, בסכום כולל או לכל תלמיד.', search, isCamp, null, {scope:'campaign'})
        + sectionFor('recurring', 'הוצאות קבועות (חודשיות)', 'מופיעות אוטומטית בכל חודש בטווח שהוגדר. אפשר לערוך אותן גם בלשונית "הוצאות קבועות".')
-       + sectionFor('expenses', 'הוצאות כלליות', 'הוצאות חד־פעמיות שלא שויכו לקמפיין. הן מתחלקות לקמפיינים לפי מספר התלמידים.', '', e => !isCamp(e));
+       + sectionFor('expenses', 'הוצאות כלליות', 'הוצאות חד־פעמיות שלא שויכו לקמפיין. הן מתחלקות לקמפיינים לפי מספר התלמידים.', '', e => !isCamp(e), null, {scope:'general'});
 }
 
 function viewIncome(){
@@ -1088,25 +1125,21 @@ function viewTracks(){
   const inSel = t => !sel || t.campaignId===sel.id;
   const total = db.tracks.filter(inSel).reduce((a,t)=>a+(Number(t.students)||0),0);
   const label = sel ? `בקמפיין ${esc(sel.name)}` : 'בכל הקמפיינים';
-  return sectionFor('tracks', 'מסלולי קורס ותלמידים', `סה"כ תלמידים ${label}: ${num(total)}. את ההוצאות הקבועות לתלמיד אפשר לעדכן ישירות בטבלה.`, '', inSel)
-       + sectionFor('expenses', 'הוצאות לתלמיד', 'הוצאות בשיוך "לכל תלמיד": הסכום מוכפל במספר התלמידים בקמפיין.', '', e => e.scope==='perStudent' && (!sel || e.campaignId===sel.id));
+  return sectionFor('tracks', 'מסלולי קורס ותלמידים', `סה"כ תלמידים ${label}: ${num(total)}. את ההוצאות הקבועות לתלמיד אפשר לעדכן ישירות בטבלה.`, '', inSel, null, sel ? {campaignId:sel.id} : null)
+       + sectionFor('expenses', 'הוצאות לתלמיד', 'הוצאות בשיוך "לכל תלמיד": הסכום מוכפל במספר התלמידים בקמפיין.', '', e => e.scope==='perStudent' && (!sel || e.campaignId===sel.id), null, sel ? {scope:'perStudent', campaignId:sel.id} : {scope:'perStudent'});
 }
 
 function viewCampaigns(){
   const all = [...db.campaigns].sort((a,b) => String(b.date).localeCompare(String(a.date)));
   if (state.campFilter!=='all' && !all.some(c => c.id===state.campFilter)) state.campFilter = 'all';
   const sel = state.campFilter==='all' ? null : all.find(c => c.id===state.campFilter);
-  const statOf = c => campaignStats(Number(c.year), summary(Number(c.year))).find(x => x.c.id===c.id);
+  const cache = {};
+  const statOf = c => campaignStat(c, cache);
   let detail;
   if (sel){
     const st = statOf(sel);
-    const exps = db.expenses.filter(e => (e.scope==='campaign'||e.scope==='perStudent') && e.campaignId===sel.id)
-      .sort((a,b) => String(b.date).localeCompare(String(a.date)));
+    const items = campaignExpenseItems(sel);
     const ctracks = db.tracks.filter(t => t.campaignId===sel.id);
-    const trackCostRows = ctracks.filter(t => Number(t.perStudentCost)).map(t => {
-      const n = Number(t.students)||0, a = Number(t.perStudentCost)||0;
-      return `<tr><td>${fmtDate(sel.date)}</td><td>הוצאות קבועות לתלמיד · ${esc(t.name)} (${money(a)} × ${num(n)})</td><td><span class="badge">הוצאות מסלול</span></td><td>מסלול ${esc(t.name)}</td><td><span class="num">${money(expNet(a,true)*n)}</span></td></tr>`;
-    }).join('');
     const tracksGross = ctracks.reduce((a,t)=>a+(Number(t.price)||0)*(Number(t.students)||0),0);
     const incomeRow = `<tr class="sum-row"><td colspan="4">סה"כ הכנסות ממסלולי הקורס (${num(studentsOf(sel.id))} תלמידים, כולל מע"מ)</td><td><span class="num">${money(tracksGross)}</span></td></tr>`;
     detail = `<div class="card">
@@ -1115,11 +1148,8 @@ function viewCampaigns(){
       </div>
       <div class="card">
         <div class="card-h"><div><h2>פירוט הוצאות הקמפיין</h2><div class="sub">הוצאות ישירות, הוצאות לכל תלמיד והוצאות קבועות לתלמיד בכל מסלול</div></div></div>
-        <div class="table-wrap"><table class="tbl"><thead><tr><th>תאריך</th><th>תיאור</th><th>קטגוריה</th><th>שיוך</th><th>נטו (סה"כ)</th></tr></thead><tbody>${exps.map(e => {
-          const a = Number(e.amount)||0;
-          const n = e.scope==='perStudent' ? expNet(a,e.vat)*studentsOf(e.campaignId) : expNet(a,e.vat);
-          return `<tr><td>${fmtDate(e.date)}</td><td>${esc(e.name)}</td><td><span class="badge">${esc(e.category)}</span></td><td>${esc(scopeLabel(e))}</td><td><span class="num">${money(n)}</span></td></tr>`;
-        }).join('')}${trackCostRows}${(exps.length || trackCostRows) ? '' : '<tr><td colspan="5" class="sub">אין הוצאות ששויכו לקמפיין הזה.</td></tr>'}${incomeRow}</tbody></table></div>
+        <div class="table-wrap"><table class="tbl"><thead><tr><th>תאריך</th><th>תיאור</th><th>קטגוריה</th><th>שיוך</th><th>נטו (סה"כ)</th></tr></thead><tbody>${items.map(r => `<tr><td>${fmtDate(r.d)}</td><td>${esc(r.name)}</td><td><span class="badge">${esc(r.cat)}</span></td><td>${esc(r.label)}</td><td><span class="num">${money(r.net)}</span></td></tr>`).join('')
+          || '<tr><td colspan="5" class="sub">אין הוצאות ששויכו לקמפיין הזה.</td></tr>'}${incomeRow}</tbody></table></div>
       </div>`;
   } else {
     const cs = all.map(statOf).filter(Boolean);
@@ -1168,7 +1198,7 @@ function viewSettings(){
             <option value="none" ${s.allocation!=='students'?'selected':''}>לא לשייך (נשאר בהוצאות העסק)</option>
           </select>
         </label>
-        <label class="check"><input type="checkbox" name="stripVat" ${s.stripVat?'checked':''}> להסיר מע"מ ממחירי המכירה והקורסים (המחירים שאני מזין כוללים מע"מ; רלוונטי לעוסק מורשה בלבד)</label>
+        <label class="check"><input type="checkbox" name="stripVat" ${s.stripVat?'checked':''}> להסיר מע"מ ממחירי הקורסים (המחירים שאני מזין כוללים מע"מ; רלוונטי לעוסק מורשה בלבד). מוצרים מחושבים תמיד כולל מע"מ</label>
         <label class="check"><input type="checkbox" name="vatRegistered" ${s.vatRegistered?'checked':''}> העסק מקבל החזר מע"מ על הוצאות (עוסק מורשה)</label>
       </div>
       <label style="margin-top:18px">קטגוריות הוצאה (שורה לכל קטגוריה)
@@ -1248,8 +1278,11 @@ function exportBackup(){
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function importFile(file){
+function importFile(file, input){
+  if (input) input.value = '';   // allows choosing the same file again
   if (!file) return;
+  if (!confirm(`לטעון את הגיבוי "${file.name}"? כל הנתונים הנוכחיים יוחלפו בנתונים מהקובץ.`)) return;
+  if (!confirm('אישור נוסף: הנתונים יוחלפו אצל כל המשתמשים, ואי אפשר לבטל את הפעולה. לטעון את הגיבוי?')) return;
   const reader = new FileReader();
   reader.onload = () => {
     try {
@@ -1271,7 +1304,7 @@ document.addEventListener('click', e => {
   if (!a) return;
   const act = a.dataset.act;
   if (act==='close-modal') return closeModal();
-  if (act==='new') return openModal(a.dataset.key);
+  if (act==='new'){ let d = null; try { d = a.dataset.defaults ? JSON.parse(a.dataset.defaults) : null; } catch(err){} return openModal(a.dataset.key, null, d); }
   if (act==='edit') return openModal(a.dataset.key, a.dataset.id);
   if (act==='del'){
     const key = a.dataset.key, id = a.dataset.id;
@@ -1294,11 +1327,13 @@ document.addEventListener('click', e => {
   if (act==='csv-report') return exportReportCsv();
   if (act==='export') return exportBackup();
   if (act==='demo'){
-    if (!confirm('לטעינת נתוני דוגמה? הנתונים הקיימים יידרסו.')) return;
+    if (!confirm('לטעון נתוני דוגמה? הנתונים הקיימים יוחלפו. מומלץ להוריד גיבוי קודם.')) return;
+    if (!confirm('אישור נוסף: הנתונים יוחלפו אצל כל המשתמשים, ואי אפשר לבטל את הפעולה. לטעון את נתוני הדוגמה?')) return;
     db = demoDb(); save(); render(); toast('נטענו נתוני דוגמה');
   }
   if (act==='reset'){
-    if (!confirm('לאפס את כל הנתונים? מומלץ לגבות קודם.')) return;
+    if (!confirm('לאפס את כל הנתונים? מומלץ להוריד גיבוי קודם.')) return;
+    if (!confirm('אישור נוסף: כל הנתונים יימחקו אצל כל המשתמשים, ואי אפשר לבטל את הפעולה. למחוק הכול?')) return;
     db = emptyDb(); save(); render(); toast('האיפוס בוצע');
   }
 });
@@ -1312,7 +1347,7 @@ document.addEventListener('submit', e => {
 
 document.addEventListener('change', e => {
   if (e.target.id==='yearSel'){ state.year = Number(e.target.value); render(); }
-  if (e.target.id==='importFile') importFile(e.target.files[0]);
+  if (e.target.id==='importFile') importFile(e.target.files[0], e.target);
   if (e.target.id==='monthSel'){ state.dashMonth = Number(e.target.value); render(); }
   if (e.target.id==='rType'){ state.report.type = e.target.value; render(); }
   if (e.target.id==='rQ'){ state.report.q = Number(e.target.value); render(); }
@@ -1342,8 +1377,8 @@ document.addEventListener('input', e => {
 const moneyExact = n => new Intl.NumberFormat('he-IL',{style:'currency',currency:'ILS',minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
 function showBarInfo(el){
   const info = document.getElementById('chartInfo'); if (!info) return;
-  const inc = Number(el.dataset.inc)||0, exp = Number(el.dataset.exp)||0;
-  info.innerHTML = `<b>${esc(el.dataset.label)}</b> · הכנסות נטו: <span class="pos">${moneyExact(inc)}</span> · הוצאות נטו: <span class="neg">${moneyExact(exp)}</span> · רווח: <b class="${inc-exp>=0?'pos':'neg'}">${moneyExact(inc-exp)}</b>`;
+  const inc = Number(el.dataset.inc)||0, exp = Number(el.dataset.exp)||0, fc = Number(el.dataset.fc)||0;
+  info.innerHTML = `<b>${esc(el.dataset.label)}</b> · הכנסות נטו: <span class="pos">${moneyExact(inc)}</span> · הוצאות נטו: <span class="neg">${moneyExact(exp)}</span> · רווח: <b class="${inc-exp>=0?'pos':'neg'}">${moneyExact(inc-exp)}</b>${fc ? ` · תחזית הוצאות קבועות: <span class="neg">${moneyExact(fc)}</span>` : ''}`;
 }
 document.addEventListener('click', e => { const b = e.target.closest('[data-bar]'); if (b) showBarInfo(b); });
 document.addEventListener('mouseover', e => { const b = e.target.closest('[data-bar]'); if (b) showBarInfo(b); });
