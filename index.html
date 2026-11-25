@@ -368,7 +368,7 @@ function applyTheme(){
   st.setProperty('--gold', T.gold);
 }
 
-const state = { page:'dashboard', campFilter:'all', trackCamp:'all', salesMonth:0, dashMonth:0, year:new Date().getFullYear(), report:{type:'year', q:1, m:new Date().getMonth()+1, campaignId:''} };
+const state = { page:'dashboard', campFilter:'all', trackCamp:'all', salesMonth:0, prodSort:'added', dashMonth:0, year:new Date().getFullYear(), report:{type:'year', q:1, m:new Date().getMonth()+1, campaignId:''} };
 
 /* ============ Helpers ============ */
 const $ = (s, el=document) => el.querySelector(s);
@@ -822,9 +822,9 @@ function campCard(s){
   </div>`;
 }
 
-function sectionFor(key, title, sub, extra, filter){
+function sectionFor(key, title, sub, extra, filter, sorter){
   const sc = SCHEMA[key];
-  const items = [...db[key]].filter(filter||(()=>true)).sort((a,b) => String(b.date||b.month||b.from||'').localeCompare(String(a.date||a.month||a.from||'')));
+  const items = [...db[key]].filter(filter||(()=>true)).sort(sorter || ((a,b) => String(b.date||b.month||b.from||'').localeCompare(String(a.date||a.month||a.from||''))));
   return `<div class="card">
     <div class="card-h">
       <div><h2>${esc(title)}</h2><div class="sub">${sub||''}</div></div>
@@ -1129,7 +1129,12 @@ function viewCampaigns(){
 }
 
 function viewProducts(){
-  return sectionFor('products', 'מוצרים (תוספי תזונה)', 'כל הסכומים כוללים מע"מ. רווח ליחידה = מחיר לקוח פחות עלות ליחידה ומשלוח ואריזה.');
+  const picker = `<label class="yearpick">מיון<select id="prodSortSel" style="width:auto">
+    <option value="added" ${state.prodSort==='added'?'selected':''}>לפי סדר הוספה</option>
+    <option value="az" ${state.prodSort==='az'?'selected':''}>לפי א–ב</option>
+  </select></label>`;
+  const sorter = state.prodSort==='az' ? (a,b) => String(a.name).localeCompare(String(b.name), 'he') : () => 0;
+  return sectionFor('products', 'מוצרים (תוספי תזונה)', 'כל הסכומים כוללים מע"מ. רווח ליחידה = מחיר לקוח פחות עלות ליחידה ומשלוח ואריזה.', picker, null, sorter);
 }
 
 function viewRecurring(){
@@ -1311,6 +1316,7 @@ document.addEventListener('change', e => {
   if (e.target.id==='rM'){ state.report.m = Number(e.target.value); render(); }
   if (e.target.id==='rCamp'){ state.report.campaignId = e.target.value; render(); }
   if (e.target.id==='campSel'){ state.campFilter = e.target.value; render(); }
+  if (e.target.id==='prodSortSel'){ state.prodSort = e.target.value; render(); }
   if (e.target.id==='trackSel'){ state.trackCamp = e.target.value; render(); }
   if (e.target.id==='salesMonthSel'){ state.salesMonth = Number(e.target.value); render(); }
   if (e.target.dataset && e.target.dataset.inline){
