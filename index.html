@@ -180,8 +180,6 @@ input[type=file][hidden]{display:none}
 .login-err{color:#b42318;min-height:1.2em;font-size:14px}
 body.locked .app{display:none}
 #logoutBtn{color:#e3b636;text-decoration:none}
-.inline-num{width:110px;padding:6px 8px;font-size:14px}
-.sum-row td{font-weight:700;border-top:2px solid var(--line);background:#fafbfe}
 </style>
 </head>
 <body>
@@ -225,7 +223,7 @@ const MONTHS_HE = ['ינו','פבר','מרץ','אפר','מאי','יוני','יו
 const DEFAULT_CATS = ['שיווק ופרסום','תוכנה ושירותים','משרד ותפעול','משלוחים','חומרי קורס','שכר','ביטוח וחשבונאות','אחר'];
 const PAGES = {
   dashboard:'לוח בקרה', expenses:'הוצאות', income:'מכירות מוצרים', tracks:'מסלולי קורס ותלמידים',
-  campaigns:'קמפיינים', products:'מוצרים', recurring:'הוצאות קבועות', staff:'עובדים', reports:'דוחות', settings:'הגדרות וגיבוי'
+  campaigns:'קמפיינים', products:'מוצרים', recurring:'קבועות ושנתיות', staff:'עובדים', reports:'דוחות', settings:'הגדרות וגיבוי'
 };
 
 function emptyDb(){
@@ -338,9 +336,6 @@ function migrate(){
   delete db.customers;
   // Older version stored per-student costs as "customer" scope; they become general expenses.
   db.expenses.forEach(e => { if (e.scope === 'customer') e.scope = 'general'; });
-  db.sales.forEach(s => { if (!s.month) s.month = ymOf(s.date); if (!s.date) s.date = `${s.month}-01`; });
-  db.products.forEach(p => { if (p.extraCost === undefined) p.extraCost = 0; });
-  db.tracks.forEach(t => { if (t.perStudentCost === undefined) t.perStudentCost = 0; });
   const ids = new Set(db.campaigns.map(c => c.id));
   db.tracks = db.tracks.filter(t => ids.has(t.campaignId));
   db.expenses.forEach(e => {
@@ -368,7 +363,7 @@ function applyTheme(){
   st.setProperty('--gold', T.gold);
 }
 
-const state = { page:'dashboard', campFilter:'all', trackCamp:'all', salesMonth:0, dashMonth:0, year:new Date().getFullYear(), report:{type:'year', q:1, m:new Date().getMonth()+1, campaignId:''} };
+const state = { page:'dashboard', campFilter:'all', dashMonth:0, year:new Date().getFullYear(), report:{type:'year', q:1, m:new Date().getMonth()+1, campaignId:''} };
 
 /* ============ Helpers ============ */
 const $ = (s, el=document) => el.querySelector(s);
@@ -394,8 +389,6 @@ const campName = id => campById(id)?.name || '—';
 const prodById = id => db.products.find(p=>p.id===id);
 const prodName = id => prodById(id)?.name || '—';
 const empById = id => db.employees.find(e=>e.id===id);
-const prodUnitCost = p => (Number(p?.unitCost)||0) + (Number(p?.extraCost)||0);
-const saleUnitProfit = s => (Number(s.price)||0) - prodUnitCost(prodById(s.productId));
 const studentsOf = campId => db.tracks.filter(t=>t.campaignId===campId).reduce((a,t)=>a+(Number(t.students)||0),0);
 
 function toast(msg){
@@ -420,15 +413,6 @@ function expenseRows(y){
     const isCamp = e.scope === 'campaign';
     rows.push({d:e.date, ym:ymOf(e.date), name:e.name, cat, gross:amt, net:expNet(amt,e.vat),
                scope: isCamp ? 'campaign' : 'general', campaignId: isCamp ? e.campaignId : null});
-  });
-  db.campaigns.forEach(c => {
-    if (Number(c.year)!==y) return;
-    const d = c.date || `${y}-01-01`;
-    db.tracks.filter(t => t.campaignId===c.id && Number(t.perStudentCost)).forEach(t => {
-      const n = Number(t.students)||0, amt = Number(t.perStudentCost)||0;
-      rows.push({d, ym:ymOf(d), name:`הוצאה לתלמיד במסלול ${t.name} (× ${num(n)})`, cat:'הוצאות מסלול',
-                 gross:amt*n, net:expNet(amt,true)*n, scope:'campaign', campaignId:c.id});
-    });
   });
   db.recurring.forEach(r => {
     for (let m=1; m<=12; m++){
@@ -455,7 +439,7 @@ function expenseRows(y){
   });
   db.sales.forEach(s => {
     if (yearOf(s.date)!==y) return;
-    const cost = (Number(s.qty)||0)*prodUnitCost(prodById(s.productId));
+    const cost = (Number(s.qty)||0)*(Number(prodById(s.productId)?.unitCost)||0);
     rows.push({d:s.date, ym:ymOf(s.date), name:`עלות מכר: ${prodName(s.productId)}`, cat:'עלות מכר', gross:cost, net:cost, scope:'product', campaignId:null});
   });
   return rows;
@@ -475,7 +459,7 @@ function revenueRows(y){
   db.sales.forEach(s => {
     if (yearOf(s.date)!==y) return;
     const gross = (Number(s.qty)||0)*(Number(s.price)||0);
-    rows.push({d:s.date, ym:ymOf(s.date), name:`מוצר: ${prodName(s.productId)}`, cat:'מוצרים', gross, net:gross,
+    rows.push({d:s.date, ym:ymOf(s.date), name:`מוצר: ${prodName(s.productId)}`, cat:'מוצרים', gross, net:revNet(gross),
                scope:'product', campaignId:null, inc:true});
   });
   return rows;
@@ -516,8 +500,8 @@ function productStats(y, onlyMonths){
     const ss = db.sales.filter(s => s.productId===p.id && yearOf(s.date)===y && (!onlyMonths || onlyMonths.includes(Number(String(s.date).slice(5,7)))));
     const units = ss.reduce((a,s)=>a+(Number(s.qty)||0),0);
     const gross = ss.reduce((a,s)=>a+(Number(s.qty)||0)*(Number(s.price)||0),0);
-    const rev = gross;
-    const cost = units*prodUnitCost(p);
+    const rev = revNet(gross);
+    const cost = units*(Number(p.unitCost)||0);
     return {p, units, rev, cost, profit: rev-cost};
   }).sort((a,b)=>b.profit-a.profit);
 }
@@ -553,18 +537,15 @@ const SCHEMA = {
       {k:'campaignId', l:'קמפיין', t:'ref', ref:'campaigns', req:1},
       {k:'name', l:'שם המסלול', t:'text', req:1, ph:'למשל: ללא ליווי'},
       {k:'price', l:'מחיר המסלול (כולל מע"מ)', t:'number', req:1},
-      {k:'students', l:'מספר תלמידים במסלול', t:'number', req:1, def:0},
-      {k:'perStudentCost', l:'הוצאות קבועות לתלמיד במסלול', t:'number', def:0}
+      {k:'students', l:'מספר תלמידים במסלול', t:'number', req:1, def:0}
     ],
-    beforeSave:d => { d.price=Number(d.price)||0; d.students=Number(d.students)||0; d.perStudentCost=Number(d.perStudentCost)||0; },
+    beforeSave:d => { d.price=Number(d.price)||0; d.students=Number(d.students)||0; },
     cols:[
       {l:'קמפיין', f:t=>esc(campName(t.campaignId))},
       {l:'מסלול', f:t=>esc(t.name)},
       {l:'מחיר', f:t=>money(t.price)},
       {l:'תלמידים', f:t=>num(t.students)},
-      {l:'סה"כ (כולל מע"מ)', f:t=>`<span class="num">${money((Number(t.price)||0)*(Number(t.students)||0))}</span>`},
-      {l:'הוצאות קבועות לתלמיד', f:t=>`<input class="inline-num" type="number" min="0" step="any" value="${esc(Number(t.perStudentCost)||0)}" data-inline="tracks" data-id="${esc(t.id)}" data-k="perStudentCost" aria-label="הוצאות קבועות לתלמיד במסלול ${esc(t.name)}">`},
-      {l:'סה"כ הוצאות מסלול', f:t=>`<span class="num">${money((Number(t.perStudentCost)||0)*(Number(t.students)||0))}</span>`}
+      {l:'סה"כ (כולל מע"מ)', f:t=>`<span class="num">${money((Number(t.price)||0)*(Number(t.students)||0))}</span>`}
     ]
   },
   products:{
@@ -572,25 +553,23 @@ const SCHEMA = {
     fields:[
       {k:'name', l:'שם המוצר', t:'text', req:1},
       {k:'price', l:'מחיר לקוח (כולל מע"מ)', t:'number', req:1},
-      {k:'unitCost', l:'עלות ליחידה מהיצרן (כולל מע"מ)', t:'number', req:1},
-      {k:'extraCost', l:'משלוח ואריזה ליחידה (כולל מע"מ)', t:'number', def:0}
+      {k:'unitCost', l:'עלות ליחידה (ללא מע"מ)', t:'number', req:1}
     ],
-    beforeSave:d => { d.price=Number(d.price)||0; d.unitCost=Number(d.unitCost)||0; d.extraCost=Number(d.extraCost)||0; },
+    beforeSave:d => { d.price=Number(d.price)||0; d.unitCost=Number(d.unitCost)||0; },
     cols:[
       {l:'מוצר', f:p=>esc(p.name)},
       {l:'מחיר לקוח', f:p=>money(p.price)},
       {l:'עלות ליחידה', f:p=>money(p.unitCost)},
-      {l:'משלוח ואריזה', f:p=>money(p.extraCost)},
       {l:'רווח ליחידה', f:p=>{
-        const price=Number(p.price)||0; const m=price-prodUnitCost(p);
-        return `<span class="num ${m>=0?'pos':'neg'}">${money(m)}</span> <span class="sub">(${pct(m,price)})</span>`;
+        const net=revNet(Number(p.price)||0); const m=net-(Number(p.unitCost)||0);
+        return `<span class="num ${m>=0?'pos':'neg'}">${money(m)}</span> <span class="sub">(${pct(m,net)})</span>`;
       }}
     ]
   },
   sales:{
     label:'מכירה',
     fields:[
-      {k:'month', l:'חודש', t:'month', req:1, def:thisMonth},
+      {k:'date', l:'תאריך', t:'date', req:1, def:today},
       {k:'productId', l:'מוצר', t:'ref', ref:'products', req:1},
       {k:'qty', l:'כמות', t:'number', req:1, def:1},
       {k:'price', l:'מחיר ליחידה (ריק = מחיר המוצר)', t:'number'}
@@ -598,13 +577,13 @@ const SCHEMA = {
     beforeSave:d => {
       if (d.price==='' || d.price===undefined){ d.price = Number(prodById(d.productId)?.price)||0; }
       d.price=Number(d.price)||0; d.qty=Number(d.qty)||0;
-      d.date = `${d.month}-01`;
     },
     cols:[
+      {l:'תאריך', f:s=>fmtDate(s.date)},
       {l:'מוצר', f:s=>esc(prodName(s.productId))},
       {l:'כמות', f:s=>num(s.qty)},
-      {l:'רווח ליחידה', f:s=>{ const m=saleUnitProfit(s); return `<span class="num ${m>=0?'pos':'neg'}">${money(m)}</span>`; }},
-      {l:'סה"כ רווח', f:s=>{ const m=saleUnitProfit(s)*(Number(s.qty)||0); return `<span class="num ${m>=0?'pos':'neg'}">${money(m)}</span>`; }}
+      {l:'מחיר ליחידה', f:s=>money(s.price)},
+      {l:'סה"כ', f:s=>`<span class="num">${money((Number(s.qty)||0)*(Number(s.price)||0))}</span>`}
     ]
   },
   expenses:{
@@ -1058,78 +1037,55 @@ function viewDashboard(){
 
 function viewExpenses(){
   const search = `<input type="search" data-search="expenses" placeholder="חיפוש הוצאה..." style="width:220px">`;
-  const isCamp = e => e.scope==='campaign' || e.scope==='perStudent';
-  return sectionFor('expenses', 'הוצאות קמפיין', 'הוצאות ששויכו לקמפיין, בסכום כולל או לכל תלמיד.', search, isCamp)
-       + sectionFor('recurring', 'הוצאות קבועות (חודשיות)', 'מופיעות אוטומטית בכל חודש בטווח שהוגדר. אפשר לערוך אותן גם בלשונית "הוצאות קבועות".')
-       + sectionFor('expenses', 'הוצאות כלליות', 'הוצאות חד־פעמיות שלא שויכו לקמפיין. הן מתחלקות לקמפיינים לפי מספר התלמידים.', '', e => !isCamp(e));
+  return sectionFor('expenses', 'רשימת הוצאות', 'הוצאה כללית מתחלקת לקמפיינים לפי מספר התלמידים. הוצאה לכל תלמיד מוכפלת במספר התלמידים בקמפיין.', search);
 }
 
 function viewIncome(){
-  const y = state.year, m = state.salesMonth;
-  const inPeriod = s => yearOf(s.date)===y && (!m || Number(String(s.date).slice(5,7))===m);
-  const rows = db.sales.filter(inPeriod);
-  const profit = rows.reduce((a,s)=>a+saleUnitProfit(s)*(Number(s.qty)||0),0);
-  const units = rows.reduce((a,s)=>a+(Number(s.qty)||0),0);
-  const period = m ? `${MONTH_NAMES[m-1]} ${y}` : `שנת ${y}`;
-  return sectionFor('sales', 'מכירות מוצרים', `${period}: ${num(units)} יחידות, סה"כ רווח ${money(profit)}. הרווח מחושב לפי מחיר המכירה פחות עלות ליחידה ומשלוח ואריזה.`, '', inPeriod);
-}
-
-function campaignPicker(id, current){
-  const all = [...db.campaigns].sort((a,b) => String(b.date).localeCompare(String(a.date)));
-  return `<label class="yearpick">קמפיין<select id="${id}" style="width:auto"><option value="all" ${current==='all'?'selected':''}>כל הקמפיינים</option>${all.map(c=>`<option value="${esc(c.id)}" ${current===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select></label>`;
+  const y = state.year;
+  const total = revenueRows(y).filter(r=>r.scope==='product').reduce((a,r)=>a+r.net,0);
+  return sectionFor('sales', 'מכירות מוצרים', `סה"כ נטו בשנת ${y}: ${money(total)}`);
 }
 
 function viewTracks(){
-  if (state.trackCamp!=='all' && !campById(state.trackCamp)) state.trackCamp = 'all';
-  const sel = state.trackCamp==='all' ? null : campById(state.trackCamp);
-  const inSel = t => !sel || t.campaignId===sel.id;
-  const total = db.tracks.filter(inSel).reduce((a,t)=>a+(Number(t.students)||0),0);
-  const label = sel ? `בקמפיין ${esc(sel.name)}` : 'בכל הקמפיינים';
-  return sectionFor('tracks', 'מסלולי קורס ותלמידים', `סה"כ תלמידים ${label}: ${num(total)}. את ההוצאות הקבועות לתלמיד אפשר לעדכן ישירות בטבלה.`, '', inSel)
-       + sectionFor('expenses', 'הוצאות לתלמיד', 'הוצאות בשיוך "לכל תלמיד": הסכום מוכפל במספר התלמידים בקמפיין.', '', e => e.scope==='perStudent' && (!sel || e.campaignId===sel.id));
+  const total = db.tracks.reduce((a,t)=>a+(Number(t.students)||0),0);
+  return sectionFor('tracks', 'מסלולי קורס ותלמידים', `סה"כ תלמידים בכל המסלולים: ${num(total)}. ללא שמות, רק מספרים לכל מסלול.`);
 }
 
 function viewCampaigns(){
-  const all = [...db.campaigns].sort((a,b) => String(b.date).localeCompare(String(a.date)));
+  const all = [...db.campaigns].sort((a,b) => (Number(b.year)-Number(a.year)) || String(b.date).localeCompare(String(a.date)));
   if (state.campFilter!=='all' && !all.some(c => c.id===state.campFilter)) state.campFilter = 'all';
   const sel = state.campFilter==='all' ? null : all.find(c => c.id===state.campFilter);
-  const statOf = c => campaignStats(Number(c.year), summary(Number(c.year))).find(x => x.c.id===c.id);
+  const picker = `<label class="yearpick">קמפיין<select id="campSel" style="width:auto"><option value="all" ${sel?'':'selected'}>כל הקמפיינים</option>${all.map(c=>`<option value="${esc(c.id)}" ${sel&&sel.id===c.id?'selected':''}>${esc(c.name)} · ${esc(c.year)}</option>`).join('')}</select></label>`;
   let detail;
   if (sel){
-    const st = statOf(sel);
+    const st = campaignStats(sel.year, summary(sel.year)).find(x => x.c.id===sel.id);
     const exps = db.expenses.filter(e => (e.scope==='campaign'||e.scope==='perStudent') && e.campaignId===sel.id)
       .sort((a,b) => String(b.date).localeCompare(String(a.date)));
-    const ctracks = db.tracks.filter(t => t.campaignId===sel.id);
-    const trackCostRows = ctracks.filter(t => Number(t.perStudentCost)).map(t => {
-      const n = Number(t.students)||0, a = Number(t.perStudentCost)||0;
-      return `<tr><td>${fmtDate(sel.date)}</td><td>הוצאות קבועות לתלמיד · ${esc(t.name)} (${money(a)} × ${num(n)})</td><td><span class="badge">הוצאות מסלול</span></td><td>מסלול ${esc(t.name)}</td><td><span class="num">${money(expNet(a,true)*n)}</span></td></tr>`;
-    }).join('');
-    const tracksGross = ctracks.reduce((a,t)=>a+(Number(t.price)||0)*(Number(t.students)||0),0);
-    const incomeRow = `<tr class="sum-row"><td colspan="4">סה"כ הכנסות ממסלולי הקורס (${num(studentsOf(sel.id))} תלמידים, כולל מע"מ)</td><td><span class="num">${money(tracksGross)}</span></td></tr>`;
     detail = `<div class="card">
         <div class="card-h"><div><h2>${esc(sel.name)}</h2><div class="sub">${sel.season==='summer'?'קיץ':'חורף'} ${esc(sel.year)} · נפתח ${fmtDate(sel.date)}</div></div></div>
         ${st ? campCard(st) : '<div class="empty">אין נתונים לקמפיין זה.</div>'}
       </div>
       <div class="card">
-        <div class="card-h"><div><h2>פירוט הוצאות הקמפיין</h2><div class="sub">הוצאות ישירות, הוצאות לכל תלמיד והוצאות קבועות לתלמיד בכל מסלול</div></div></div>
-        <div class="table-wrap"><table class="tbl"><thead><tr><th>תאריך</th><th>תיאור</th><th>קטגוריה</th><th>שיוך</th><th>נטו (סה"כ)</th></tr></thead><tbody>${exps.map(e => {
+        <div class="card-h"><div><h2>הוצאות ששויכו לקמפיין</h2><div class="sub">הוצאות ישירות והוצאות לכל תלמיד</div></div></div>
+        ${exps.length ? `<div class="table-wrap"><table class="tbl"><thead><tr><th>תאריך</th><th>תיאור</th><th>קטגוריה</th><th>שיוך</th><th>נטו (סה"כ)</th></tr></thead><tbody>${exps.map(e => {
           const a = Number(e.amount)||0;
           const n = e.scope==='perStudent' ? expNet(a,e.vat)*studentsOf(e.campaignId) : expNet(a,e.vat);
           return `<tr><td>${fmtDate(e.date)}</td><td>${esc(e.name)}</td><td><span class="badge">${esc(e.category)}</span></td><td>${esc(scopeLabel(e))}</td><td><span class="num">${money(n)}</span></td></tr>`;
-        }).join('')}${trackCostRows}${(exps.length || trackCostRows) ? '' : '<tr><td colspan="5" class="sub">אין הוצאות ששויכו לקמפיין הזה.</td></tr>'}${incomeRow}</tbody></table></div>
+        }).join('')}</tbody></table></div>` : '<div class="empty">אין הוצאות ששויכו לקמפיין הזה.</div>'}
       </div>`;
   } else {
-    const cs = all.map(statOf).filter(Boolean);
+    const y = state.year;
+    const cs = campaignStats(y, summary(y));
     detail = `<div class="card">
-        <div class="card-h"><h2>כל הקמפיינים</h2><span class="sub">מהחדש לישן. בחרו קמפיין מהרשימה לפירוט מלא</span></div>
-        ${cs.length ? `<div class="grid-3">${cs.map(campCard).join('')}</div>` : '<div class="empty">אין עדיין קמפיינים.</div>'}
+        <div class="card-h"><h2>קמפיינים בשנת ${y}</h2><span class="sub">השנה נבחרת בראש העמוד</span></div>
+        ${cs.length ? `<div class="grid-3">${cs.map(campCard).join('')}</div>` : '<div class="empty">אין קמפיינים לשנה זו.</div>'}
       </div>`;
   }
-  return detail + sectionFor('campaigns', 'קמפיינים', 'כל קמפיין מכיל מסלולי תשלום ומספר תלמידים לכל מסלול.', '', sel ? (c => c.id===sel.id) : null);
+  return detail + sectionFor('campaigns', 'קמפיינים', 'כל קמפיין מכיל מסלולי תשלום ומספר תלמידים לכל מסלול.', picker, sel ? (c => c.id===sel.id) : null);
 }
 
 function viewProducts(){
-  return sectionFor('products', 'מוצרים (תוספי תזונה)', 'כל הסכומים כוללים מע"מ. רווח ליחידה = מחיר לקוח פחות עלות ליחידה ומשלוח ואריזה.');
+  return sectionFor('products', 'מוצרים (תוספי תזונה)', 'מחיר לקוח כולל מע"מ ועלות ליחידה ללא מע"מ.');
 }
 
 function viewRecurring(){
@@ -1204,12 +1160,8 @@ function render(){
   const years = [];
   for (let y=state.year-3; y<=state.year+2; y++) years.push(y);
   $('#top').innerHTML = `<h1>${esc(PAGES[page])}</h1><div class="sub">${esc(bizName)}</div>`;
-  const monthPick = (id, cur) => `<label class="yearpick">חודש<select id="${id}" style="width:auto"><option value="0">כל השנה</option>${MONTH_NAMES.map((n,i)=>`<option value="${i+1}" ${cur===i+1?'selected':''}>${n}</option>`).join('')}</select></label>`;
-  $('#actions').innerHTML = page==='campaigns' ? campaignPicker('campSel', state.campFilter)
-    : page==='tracks' ? campaignPicker('trackSel', state.trackCamp)
-    : page==='settings' ? '' : `
-    ${page==='dashboard' ? monthPick('monthSel', state.dashMonth) : ''}
-    ${page==='income' ? monthPick('salesMonthSel', state.salesMonth) : ''}
+  $('#actions').innerHTML = page==='settings' ? '' : `
+    ${page==='dashboard' ? `<label class="yearpick">חודש<select id="monthSel" style="width:auto"><option value="0">כל השנה</option>${MONTH_NAMES.map((n,i)=>`<option value="${i+1}" ${state.dashMonth===i+1?'selected':''}>${n}</option>`).join('')}</select></label>` : ''}
     <label class="yearpick">שנה
       <select id="yearSel" style="width:auto">${years.map(y=>`<option value="${y}" ${y===state.year?'selected':''}>${y}</option>`).join('')}</select>
     </label>`;
@@ -1237,9 +1189,9 @@ function demoDb(){
     {id:'t4', campaignId:'cs', name:'רגיל',      price:3200, students:38}
   ];
   d.products = [
-    {id:'p1', name:'ויטמין D3', price:99,  unitCost:26, extraCost:4},
-    {id:'p2', name:'אומגה 3',   price:129, unitCost:37, extraCost:4},
-    {id:'p3', name:'מגנזיום',   price:79,  unitCost:21, extraCost:4}
+    {id:'p1', name:'ויטמין D3', price:99,  unitCost:22},
+    {id:'p2', name:'אומגה 3',   price:129, unitCost:31},
+    {id:'p3', name:'מגנזיום',   price:79,  unitCost:18}
   ];
   d.expenses.push(
     {id:uid(), date:`${y}-01-10`, name:'קמפיין פייסבוק וגוגל', amount:4800, vat:true,  category:'שיווק ופרסום', scope:'campaign', campaignId:'cw'},
@@ -1262,9 +1214,9 @@ function demoDb(){
   for (let m=1; m<=10; m++){
     d.worklog.push({id:uid(), employeeId:'e1', month:`${y}-${pad(m)}`, hours:60});
     d.worklog.push({id:uid(), employeeId:'e2', month:`${y}-${pad(m)}`, hours:40});
-    d.sales.push({id:uid(), month:`${y}-${pad(m)}`, date:`${y}-${pad(m)}-01`, productId:'p1', qty:18+m, price:99});
-    d.sales.push({id:uid(), month:`${y}-${pad(m)}`, date:`${y}-${pad(m)}-01`, productId:'p2', qty:10+(m%4), price:129});
-    d.sales.push({id:uid(), month:`${y}-${pad(m)}`, date:`${y}-${pad(m)}-01`, productId:'p3', qty:8, price:79});
+    d.sales.push({id:uid(), date:`${y}-${pad(m)}-05`, productId:'p1', qty:18+m, price:99});
+    d.sales.push({id:uid(), date:`${y}-${pad(m)}-12`, productId:'p2', qty:10+(m%4), price:129});
+    d.sales.push({id:uid(), date:`${y}-${pad(m)}-20`, productId:'p3', qty:8, price:79});
   }
   return d;
 }
@@ -1348,14 +1300,6 @@ document.addEventListener('change', e => {
   if (e.target.id==='rM'){ state.report.m = Number(e.target.value); render(); }
   if (e.target.id==='rCamp'){ state.report.campaignId = e.target.value; render(); }
   if (e.target.id==='campSel'){ state.campFilter = e.target.value; render(); }
-  if (e.target.id==='trackSel'){ state.trackCamp = e.target.value; render(); }
-  if (e.target.id==='salesMonthSel'){ state.salesMonth = Number(e.target.value); render(); }
-  if (e.target.dataset && e.target.dataset.inline){
-    const t = e.target, v = Number(t.value);
-    if (!(v >= 0)) { toast('אי אפשר להזין ערך שלילי'); return render(); }
-    const item = (db[t.dataset.inline]||[]).find(x => x.id===t.dataset.id);
-    if (item){ item[t.dataset.k] = v; save(); render(); toast('נשמר'); }
-  }
 });
 
 document.addEventListener('input', e => {
@@ -1401,7 +1345,7 @@ document.addEventListener('visibilitychange', async () => {
   try { await pullRemote(); render(); } catch(e){ /* keep the current view */ }
 });
 
-try { history.replaceState(null, '', location.pathname + '#dashboard'); } catch(e){ /* תצוגה בתוך מסגרת: אין צורך */ }
+history.replaceState(null, '', location.pathname + '#dashboard');
 route();
 session = readSession();
 if (session) startApp(); else showLogin();
